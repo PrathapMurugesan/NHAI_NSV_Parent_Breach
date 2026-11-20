@@ -58,5 +58,14 @@ python3 patch/patch_parent_breach.py --all --silver-root s3://bucket/other/Silve
   again with the extraction to get them (they then follow the rule from the start).
 * Report per UPC and table (records, records turned into a breach, new IDs, status): `patch/logs/parent_breach_<time>.csv`
   and, with `--apply`, `<silver-root>/_patch_logs/parent_breach_<time>.csv`.
+* Log of the whole run (every UPC, table, count and warning): `patch/logs/parent_breach_<time>.log`.
+* DQ report, same layout as the extraction's validation report (section, check, scope, checked, failed, status, detail):
+  `patch/logs/parent_breach_dq_<time>.csv`. Checks per table: P1 rows and key columns unchanged; P2 no breach flag removed,
+  every child breach is a parent / lane breach, flags changed only by the rule; P3 child-only breach is Bad / Poor; P4 breach
+  has length and defect_id; P5 every breach has a display_defect_id, existing IDs kept, new IDs well formed, unique and not
+  used before in the UPC; P6 columns the patch does not own (IRC, values) unchanged; P7 (with `--apply`) the written file is
+  read back and compared. A table that fails a check is **not written**; a table that fails the read-back is restored from its
+  backup and reported as `ERROR`. The exit code is 1 on any `ERROR` or DQ `FAIL`.
+* With `--apply` the report, DQ report and log are also copied to `<silver-root>/_patch_logs/`.
 * Run the dry run first and look at the numbers; UPCs processed with the new extraction code already follow the rule
   and show `unchanged`.

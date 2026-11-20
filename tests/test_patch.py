@@ -87,6 +87,32 @@ class TestParentBreachPatch(unittest.TestCase):
         P.main(["--silver-root", self.tmp, "--all", "--apply", "--workers", "1"])   # second run changes nothing
         pd.testing.assert_frame_equal(before, pd.read_parquet(self._lane_file()))
 
+    def test_logs_and_dq_are_written(self):
+        P.main(["--silver-root", self.tmp, "--all", "--apply", "--workers", "1"])
+        logs = os.path.join(self.tmp, "_patch_logs")
+        names = sorted(os.listdir(logs))
+        self.assertTrue(any(n.endswith(".log") for n in names))
+        dq_name = next(n for n in names if "_dq_" in n)
+        dq = pd.read_csv(os.path.join(logs, dq_name))
+        self.assertGreater(len(dq), 0)
+        self.assertNotIn("FAIL", set(dq["status"]))                      # a correct patch passes every check
+        self.assertTrue({"P1 rows", "P2 flags", "P3 condition", "P5 display ids", "P6 untouched", "P7 readback"} <= set(dq["section"]))
+
+    def test_dq_catches_a_wrong_result(self):
+        rows = []
+        it = P._prep(self.folder, {}, "lane", "cracking", rows, "t")
+        out, n = P.assign_missing_display_ids(it["out"], "201126", 8)
+        good = P.dq_checks(it, out, n, {"D/201126/N/00007"}, "s")
+        self.assertNotIn("FAIL", {c["status"] for c in good})
+        bad = out.copy()
+        bad.loc[bad["lane"] == "L3", "breach_flag"] = 0                   # a breach removed
+        bad.loc[bad["lane"] == "L3", "display_defect_id"] = "D/201126/N/00099"   # an existing ID changed
+        bad.loc[bad["lane"] == "L1", "road_condition"] = "Good"           # child breach not Bad
+        bad.loc[bad["lane"] == "L2", "affected_length_irc"] = 5.0         # IRC column touched
+        failed = {c["check"] for c in P.dq_checks(it, bad, n, set(), "s") if c["status"] == "FAIL"}
+        self.assertTrue({"no breach flag removed", "existing display_defect_id kept", "child-only breach is Bad",
+                         "other columns unchanged (IRC, values, ...)"} <= failed, failed)
+
     def test_upc_without_lane_table_is_skipped_not_failed(self):
         os.remove(self._lane_file())
         rows = P.patch_upc(self.tmp, ("B", "2", "1", "U1"), False, "unused", "t")
