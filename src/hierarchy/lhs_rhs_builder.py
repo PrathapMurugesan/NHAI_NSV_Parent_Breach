@@ -27,6 +27,7 @@ from src.common.constants import (
     child_kind,
     t_top,
     all_tables,
+    lane_1000m_table,
     ca_iv,
     SRC_10M,
     SRC_100,
@@ -41,6 +42,7 @@ from src.common.constants import (
 )
 from src.common.logger import get_logger
 from src.hierarchy.parent_builder import build_side_parent
+from src.hierarchy.lane_builder import assign_missing_display_ids, build_lane_1000m, max_display_seq
 from src.hierarchy.child_builder import (
     build_child_ca,
     build_child_10m,
@@ -282,4 +284,16 @@ def build_all_silver_hierarchy(
 
     # Assign display defect IDs
     new_outputs = assign_display_defect_ids(new_outputs, date_str, starting_seq=starting_seq)
+
+    # Lane-wise 1000m tables (L1, L2, ... instead of LHS / RHS), added after the numbering so the display
+    # defect IDs of the main tables stay as they are. Their breach rows get new IDs continuing the counter
+    # (a row that already has an ID keeps it).
+    seq = max(starting_seq, max_display_seq(*new_outputs.values()))
+    for d in DEFECTS_LIN:
+        lane_df = build_lane_1000m(d, output_dfs.get(SRC_1KM[d]), upc, irc_ths.get(d), PARENT_LENGTH_M,
+                                   src_10m=output_dfs.get(SRC_10M[d]))
+        if not lane_df.empty:
+            lane_df, n_new = assign_missing_display_ids(lane_df, date_str, seq + 1)
+            seq += n_new
+            new_outputs[lane_1000m_table(d)] = lane_df
     return new_outputs

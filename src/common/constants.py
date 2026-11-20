@@ -147,10 +147,16 @@ def t_top(d: str) -> str:
     return ca_children[0] if ca_children else ""
 
 
+def lane_1000m_table(d: str) -> Optional[str]:
+    """Lane-wise (L1, L2, ... not LHS/RHS) 1000m table of defect d: master_<d>_1000m_lane; none for pothole."""
+    return f"master_{d}_1000m_lane" if d in DEFECTS_LINEAR else None
+
+
 def all_tables(d: str) -> List[str]:
-    """All table names for defect d (parent + children)."""
+    """All table names for defect d (parent + children + lane-wise 1000m)."""
     p = [t_parent(d)] if has_parent(d) else []
-    return p + child_tables(d)
+    lane = [lane_1000m_table(d)] if lane_1000m_table(d) else []
+    return p + child_tables(d) + lane
 
 
 def ca_iv(d: str, default_iv: Optional[int] = None) -> int:

@@ -16,16 +16,23 @@ import requests
 import pandas as pd
 
 from src.common.logger import get_logger
-from src.common.fs_utils import path_exists, walk_files
+from src.common.fs_utils import path_exists, read_file_bytes, walk_files, write_file_bytes
 
 logger = get_logger(__name__)
 
 DEFAULT_UPLOAD_URL = "https://nhaidhms-stage-api.dic.org.in/defects/images/upload"
 
+LEDGER_COLUMNS = ['uploaded_at', 'upc', 'phase', 'cycle', 'table', 'defect_type', 'image_name',
+                  'display_defect_id', 'source_path', 'cdn_url', 'status', 'error']
+
 
 class ImageUploader:
     """
     Manages indexing and uploading of pothole and cracking defect images.
+
+    With ledger_path set, every upload is written to that CSV (local path or s3://). An image whose
+    (defect_type, image_name) is already there with status 'uploaded' is NOT sent to the CDN again: its
+    recorded cdn_url is reused. Failed uploads are logged too, but are retried on the next run.
     """
 
     def __init__(
@@ -35,8 +42,17 @@ class ImageUploader:
         max_workers: int = 4,
         retries: int = 2,
         retry_delay_sec: float = 1.0,
+        ledger_path: Optional[str] = None,
+        run_info: Optional[Dict[str, Any]] = None,
     ):
         self.deliverable_dir = deliverable_dir
+        self.ledger_path = ledger_path
+        self.run_info = run_info or {}
+        self.ledger = self._load_ledger()
+        self.uploaded: Dict[Tuple[str, str], str] = {
+            (r['defect_type'], r['image_name']): r['cdn_url']
+            for r in self.ledger if r.get('status') == 'uploaded' and r.get('cdn_url')
+        }
         self.upload_url = upload_url.rstrip('/')
         if not self.upload_url.endswith('/defects/images/upload'):
             self.upload_url = f"{self.upload_url}/defects/images/upload"
@@ -46,6 +62,29 @@ class ImageUploader:
         self.session = requests.Session()
         self.image_index: Dict[str, Dict[str, str]] = {'cracking': {}, 'pothole': {}}
         self._index_images()
+
+    def _load_ledger(self) -> List[Dict[str, Any]]:
+        """Rows of the upload log from earlier runs ([] when there is none yet / it cannot be read)."""
+        if not self.ledger_path or not path_exists(self.ledger_path):
+            return []
+        try:
+            df = pd.read_csv(io.BytesIO(read_file_bytes(self.ledger_path)), dtype=str).fillna('')
+            rows = df.to_dict('records')
+            logger.info("Image upload log: %d earlier row(s), %d image(s) already on the CDN (%s)",
+                        len(rows), sum(1 for r in rows if r.get('status') == 'uploaded'), self.ledger_path)
+            return rows
+        except Exception as e:
+            logger.warning("Image upload log %s could not be read (%s) - starting without it", self.ledger_path, e)
+            return []
+
+    def _save_ledger(self) -> None:
+        if not self.ledger_path:
+            return
+        try:
+            df = pd.DataFrame(self.ledger, columns=LEDGER_COLUMNS)
+            write_file_bytes(self.ledger_path, df.to_csv(index=False).encode('utf-8'))
+        except Exception as e:
+            logger.warning("Image upload log %s could not be written: %s", self.ledger_path, e)
 
     def _index_images(self) -> None:
         """
@@ -102,15 +141,7 @@ class ImageUploader:
 
         for attempt in range(1, self.retries + 1):
             try:
-                if path.startswith("s3://"):
-                    import pyarrow.fs as pafs
-                    fs, path_in_fs = pafs.FileSystem.from_uri(path)
-                    with fs.open_input_stream(path_in_fs) as fh:
-                        img_bytes = fh.read()
-                    files = {'image': (os.path.basename(path), io.BytesIO(img_bytes), 'image/jpeg')}
-                else:
-                    with open(path, 'rb') as fh:
-                        files = {'image': (os.path.basename(path), io.BytesIO(fh.read()), 'image/jpeg')}
+                files = {'image': (os.path.basename(path), io.BytesIO(read_file_bytes(path)), 'image/jpeg')}
 
                 data = {'defect_type': kind, 'display_defect_id': safe_id}
                 r = self.session.post(self.upload_url, files=files, data=data, timeout=30)
@@ -140,8 +171,9 @@ class ImageUploader:
             'table': table_name,
             'defect_type': defect_type,
             'images_to_upload': 0,
+            'already_uploaded': 0,          # on the CDN from an earlier run (upload log) - not sent again
             'no_file_found': 0,
-            'uploaded': 0,
+            'uploaded': 0,                  # sent to the CDN in this run
             'failed': 0,
             'rows_updated': 0,
         }
@@ -168,9 +200,15 @@ class ImageUploader:
 
         tasks = []
         no_file = []
+        url_map: Dict[str, str] = {}
         for _, r in todo.iterrows():
             img_name = r['image_name']
             did = r['display_defect_id']
+            known = self.uploaded.get((defect_type, str(img_name)))
+            if known:                                   # already on the CDN: reuse its url, upload nothing
+                url_map[img_name] = known
+                summary['already_uploaded'] += 1
+                continue
             img_path = self.find_image(img_name, defect_type)
             if img_path and path_exists(img_path):
                 tasks.append((img_name, img_path, did))
@@ -178,24 +216,33 @@ class ImageUploader:
                 no_file.append(img_name)
 
         summary['no_file_found'] = len(no_file)
-        url_map: Dict[str, str] = {}
 
         if tasks:
             def _worker(item):
                 n, p, d = item
                 ok, res = self.upload_one_image(p, defect_type, d)
-                return n, ok, res
+                return n, p, d, ok, res
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 results = list(executor.map(_worker, tasks))
 
-            for n, ok, res in results:
+            now = time.strftime('%Y-%m-%d %H:%M:%S')
+            for n, p, d, ok, res in results:
+                self.ledger.append({
+                    'uploaded_at': now, 'upc': self.run_info.get('upc', ''), 'phase': self.run_info.get('phase', ''),
+                    'cycle': self.run_info.get('cycle', ''), 'table': table_name, 'defect_type': defect_type,
+                    'image_name': n, 'display_defect_id': d, 'source_path': p,
+                    'cdn_url': res if ok else '', 'status': 'uploaded' if ok else 'failed',
+                    'error': '' if ok else res,
+                })
                 if ok:
                     url_map[n] = res
+                    self.uploaded[(defect_type, str(n))] = res
                     summary['uploaded'] += 1
                 else:
                     logger.warning("Image upload failed for %s: %s", n, res)
                     summary['failed'] += 1
+            self._save_ledger()                          # after every batch, so a crash loses nothing
 
         if url_map:
             updated_count = 0

@@ -369,9 +369,15 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
 
     # 9. Defect Images & CDN Upload
     logger.info("[Step 9/10] Processing Defect Image Uploads...")
+    # upload log next to the UPC's tables: an image already on the CDN is never uploaded again
+    upc_root = settings.silver_output_dir.rstrip("/\\")
+    if os.path.basename(upc_root) == "dlm_kpi_new":
+        upc_root = os.path.dirname(upc_root)
     uploader = ImageUploader(
         deliverable_dir=settings.deliverable_dir,
         upload_url=settings.image_upload_base_url,
+        ledger_path=f"{upc_root}/image_upload_log.csv",
+        run_info={'upc': settings.upc, 'phase': settings.phase, 'cycle': settings.cycle},
     )
     for t_img, kind in [('master_pothole', 'pothole'), ('master_cracking_10m', 'cracking')]:
         if t_img in silver_outputs and not silver_outputs[t_img].empty:

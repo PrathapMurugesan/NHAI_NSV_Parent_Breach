@@ -218,6 +218,22 @@ def read_excel_df(path: str, sheet_name: Any = 0, header: Any = 0) -> pd.DataFra
     return pd.read_excel(path, sheet_name=sheet_name, header=header)
 
 
+def read_file_bytes(path: str) -> bytes:
+    """Read a file's raw bytes (local path or s3:// URI). S3 keys are passed as plain strings, so spaces,
+    '&' and a double '//' in the key work (pyarrow's URI parser rejects them)."""
+    if path.startswith("s3://"):
+        s3 = _get_s3_client()
+        bucket, key = _parse_s3_url(path)
+        if s3:
+            return s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+        import pyarrow.fs as pafs
+        fs = pafs.S3FileSystem(region=os.getenv("AWS_REGION", "ap-south-1"))
+        with fs.open_input_stream(f"{bucket}/{key}") as stream:
+            return stream.read()
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 def write_parquet_df(df: pd.DataFrame, path: str):
     """Write DataFrame as Parquet to local or S3 destination."""
     buf = io.BytesIO()
