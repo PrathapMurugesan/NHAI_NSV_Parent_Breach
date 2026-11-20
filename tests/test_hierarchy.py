@@ -54,37 +54,43 @@ class TestHierarchy(unittest.TestCase):
     def test_side_parent_breach_follows_children(self):
         CA, IRC = 2000.0, 2400.0
         bi = lambda iri: 630 * iri ** 1.12
-        spikes = {('L1', 500): 3.2,      # BI ~2300: breaches CA only
-                  ('R1', 200): 3.5}      # BI ~2540: breaches CA and IRC
-        rows = []
+        rows = []                                    # 10m rows only feed the side average (all low: BI ~630)
         for lane in ('L1', 'L2', 'R1'):
             for st in range(0, 2000, 10):
-                iri = spikes.get((lane, st), 1.0)
                 for std, thr in (('CA', CA), ('IRC', IRC)):
-                    rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, iri_value=iri, lwp_iri=iri,
-                                     rwp_iri=iri, metric_value=bi(iri), breach_flag=int(bi(iri) >= thr),
-                                     threshold_name=f'As per {std}'))
+                    rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, iri_value=1.0, lwp_iri=1.0,
+                                     rwp_iri=1.0, metric_value=bi(1.0), breach_flag=0, threshold_name=f'As per {std}'))
         src_10m = pd.DataFrame(rows)
+        # the "as per CA" child (100m): L1 breaches at 500-600 (LHS 0-1000), R1 at 1200-1300 (RHS 1000-2000)
+        ca_children = pd.DataFrame([
+            dict(lane=l, start_chainage=st, end_chainage=st + 100, threshold_name='As per CA',
+                 metric_value=2100.0 if (l, st) in (('L1', 500), ('R1', 1200)) else 700.0,
+                 breach_flag=int((l, st) in (('L1', 500), ('R1', 1200))))
+            for l in ('L1', 'L2', 'R1') for st in range(0, 2000, 100)])
         src_df = pd.DataFrame([
             dict(lane=l, start_chainage=s, end_chainage=s + 1000, metric_value=700.0, breach_flag=0,
                  threshold_name='As per CA', length_m=1000.0, segment_count=100, pavement_type='Bituminous')
             for l in ('L1', 'L2', 'R1') for s in (0, 1000)])
 
-        out = build_side_parent('roughness', src_df, 'U1', CA, 1000, src_10m=src_10m, irc_threshold=IRC)
+        out = build_side_parent('roughness', src_df, 'U1', CA, 1000, src_10m=src_10m, irc_threshold=IRC,
+                                ca_children=ca_children)
         get = lambda side, start: out[(out['side'] == side) & (out['start_chainage'] == start)].iloc[0]
 
-        lhs0 = get('LHS', 0)                      # side average is far below the limit, one 10m child breaches
+        lhs0 = get('LHS', 0)                      # the side average is far below the limit, one CA child breaches
         self.assertLess(lhs0['metric_value'], CA)
         self.assertEqual(lhs0['breach_flag'], 1)
         self.assertEqual(lhs0['road_condition'], 'Bad')
+        self.assertTrue(str(lhs0['rating_ca']).startswith('Poor'))        # not Good, as the average would rate
         self.assertGreater(lhs0['affected_length_ca'], 0)
-        self.assertEqual(lhs0['affected_length_irc'], 0)          # the child breaches CA only
-        self.assertEqual(get('LHS', 1000)['breach_flag'], 0)       # no breaching child, low average -> no breach
-        rhs0 = get('RHS', 0)
-        self.assertEqual(rhs0['breach_flag'], 1)
-        self.assertGreater(rhs0['affected_length_irc'], 0)         # IRC decided from its own 10m rows
-        self.assertEqual(rhs0['rating_irc'], 'Poor')
-        self.assertEqual(get('RHS', 1000)['breach_flag'], 0)
+        self.assertEqual(lhs0['affected_length_irc'], 0)                  # IRC stays on the parent's own value
+        self.assertEqual(lhs0['rating_irc'], 'Good')
+        self.assertEqual(get('LHS', 1000)['breach_flag'], 0)               # no breaching child, low average
+        self.assertTrue(str(get('LHS', 1000)['rating_ca']).startswith('Good'))
+        self.assertEqual(get('RHS', 0)['breach_flag'], 0)
+        self.assertEqual(get('RHS', 1000)['breach_flag'], 1)
+        # without the child table the parent keeps its own value-based flag
+        none = build_side_parent('roughness', src_df, 'U1', CA, 1000, src_10m=src_10m, irc_threshold=IRC)
+        self.assertEqual(int(none['breach_flag'].sum()), 0)
 
     def test_lane_1000m_builder(self):
         from src.hierarchy.lane_builder import build_lane_1000m
@@ -134,29 +140,28 @@ class TestHierarchy(unittest.TestCase):
             'lane': ['L1', 'L2', 'R1'], 'start_chainage': [0, 0, 0], 'end_chainage': [1000, 1000, 1000],
             'metric_value': [700.0, 700.0, 700.0], 'breach_flag': [0, 0, 0],       # every lane average is below the limit
             'threshold_name': ['As per CA'] * 3, 'length_m': [1000.0] * 3, 'road_condition': ['Good'] * 3,
+            'rating_ca': ['Good (<1600mm/km)'] * 3,
         })
-        rows = []
-        for lane in ('L1', 'L2', 'R1'):
-            for st in range(0, 1000, 10):
-                spike = (lane == 'L1' and st == 500)                                # one breaching 10m child on L1
-                for std in ('CA', 'IRC'):
-                    rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, threshold_name=f'As per {std}',
-                                     breach_flag=int(spike and std == 'CA')))     # breaches CA, not IRC
-        children = pd.DataFrame(rows)
+        children = pd.DataFrame([                                                  # "as per CA" child, 100m rows
+            dict(lane=l, start_chainage=st, end_chainage=st + 100, threshold_name='As per CA',
+                 breach_flag=int(l == 'L1' and st == 500))                         # one breaching child on L1
+            for l in ('L1', 'L2', 'R1') for st in range(0, 1000, 100)])
 
-        out = build_lane_1000m('roughness', src_df, 'U1', irc_threshold=2400.0, src_10m=children)
+        out = build_lane_1000m('roughness', src_df, 'U1', irc_threshold=2400.0, ca_children=children, ca_threshold=2000.0)
         get = lambda lane: out[out['lane'] == lane].iloc[0]
-        self.assertEqual(get('L1')['breach_flag'], 1)                              # a child breaches -> the lane breaches
+        self.assertEqual(get('L1')['breach_flag'], 1)                              # a CA child breaches -> the lane breaches
         self.assertEqual(get('L1')['defect_id'], 'U1_L1_0_1000')
         self.assertEqual(get('L1')['affected_length_ca'], 1000.0)
         self.assertEqual(get('L1')['road_condition'], 'Bad')
-        self.assertEqual(get('L1')['affected_length_irc'], 0.0)                    # the child breaches CA only
+        self.assertTrue(str(get('L1')['rating_ca']).startswith('Poor'))            # not Good, as the average would rate
+        self.assertEqual(get('L1')['affected_length_irc'], 0.0)                    # IRC stays on the lane's own value
         self.assertEqual(get('L1')['rating_irc'], 'Good')
         self.assertEqual(get('L2')['breach_flag'], 0)                              # no breaching child, low average
         self.assertEqual(get('L2')['road_condition'], 'Good')
+        self.assertTrue(str(get('L2')['rating_ca']).startswith('Good'))
         self.assertEqual(get('R1')['breach_flag'], 0)                              # the child of L1 does not count for R1
 
-        # without the 10m table the lane keeps its own value-based flag
+        # without the child table the lane keeps its own value-based flag
         self.assertEqual(build_lane_1000m('roughness', src_df, 'U1').iloc[0]['breach_flag'], 0)
 
     def test_missing_display_ids_are_generated_existing_kept(self):

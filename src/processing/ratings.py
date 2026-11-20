@@ -93,6 +93,20 @@ def compute_ca_rating_label(defect: str, metric_value: Any, bi_value: Any = None
     return None
 
 
+def poor_rating_label(defect: str, ca_threshold: Optional[float]) -> Optional[str]:
+    """
+    The 'Poor' band label of a defect (what a record is rated when it is a breach only because an "as per CA"
+    child breaches, while its own average value would rate Good / Very Good). None when there is no threshold.
+    """
+    if ca_threshold is None or pd.isna(ca_threshold):
+        return None
+    t = float(ca_threshold)
+    probe = {'roughness': t + 1.0, 'rutting': t + 1.0, 'ravelling': t, 'cracking': round(t * 4) + 1.0}.get(defect)
+    if probe is None:
+        return None
+    return compute_ca_rating_label(defect, probe, probe if defect == 'roughness' else None, {defect: t})
+
+
 def standardize_and_rate(
     output_dfs: Dict[str, pd.DataFrame],
     thresholds: Optional[Dict[str, float]] = None,

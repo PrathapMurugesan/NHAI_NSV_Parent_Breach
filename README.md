@@ -179,9 +179,11 @@ python3 -m unittest discover tests
 | 19 | `master_ravelling_1000m_lane` | 92 | `lane_1000m` | Lane-wise 1000m ravelling |
 
 The `master_<defect>_1000m_lane` tables (no pothole) have one record per lane per 1000m, from the lane-wise 1000m aggregate
-(CA values). `breach_flag` / `affected_length_ca` are set when the lane's value is at or above the CA threshold **or any one 10m
-child of that lane in those 1000m breaches**; `affected_length_irc` (and `rating_irc` for roughness and rutting) use the IRC limit
-or an IRC 10m child breach, on the same record. The LHS / RHS parents follow the same rule per side. Processed UPCs can be brought
+(CA values). `breach_flag` / `affected_length_ca` are set when the lane's value is at or above the CA threshold **or any one
+"as per CA" child (`master_<defect>_as_per_ca`) of that lane in those 1000m breaches** (the 10m rows are not used); a row that breaches
+only through a child gets `road_condition = Bad` and the Poor `rating_ca`, even if its average would rate Good. `affected_length_irc`
+(and `rating_irc` for roughness and rutting) use the IRC limit on the record's own value. The LHS / RHS parents follow the same rule per
+side. Processed UPCs can be brought
 up to date with `patch/patch_parent_breach.py` (see `patch/README.md`). Breach rows of the lane tables get a
 `display_defect_id` continuing the UPC's counter (a row that already has one keeps it). The lane tables are numbered after the main
 tables, so the IDs of the other tables (the LHS / RHS parents and the children) do not change.

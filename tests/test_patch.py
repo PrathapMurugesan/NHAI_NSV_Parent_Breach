@@ -25,19 +25,18 @@ def _lane_table():
         'breach_flag': [0, 0, 1, 1], 'defect_id': [None, None, 'U1_L3_0_1000', 'U1_L4_0_1000'],
         'display_defect_id': [None, None, 'D/201126/N/00007', None],
         'road_condition': ['Good', 'Good', 'Bad', 'Bad'],
+        'rating_ca': ['Very Good (<5%)', 'Very Good (<5%)', 'Poor (20-30%)', 'Poor (20-30%)'],
+        'threshold_value': [5.0] * n,
         'affected_length_ca': [0.0, 0.0, 1000.0, 1000.0], 'affected_length': [0.0, 0.0, 1000.0, 1000.0],
         'affected_length_irc': [0.0] * n, 'measures': [json.dumps({})] * n,
     })
 
 
-def _children_10m():
-    rows = []
-    for lane in ('L1', 'L2', 'L3', 'L4'):
-        for st in range(0, 1000, 10):
-            for std in ('CA', 'IRC'):
-                rows.append(dict(lane=lane, start_chainage=st, end_chainage=st + 10, threshold_name=f'As per {std}',
-                                 breach_flag=int(lane == 'L1' and st == 500 and std == 'CA')))
-    return pd.DataFrame(rows)
+def _ca_children():
+    """The "as per CA" child (100m rows): only L1 has a breaching child, at 500-600."""
+    return pd.DataFrame([dict(lane=lane, start_chainage=st, end_chainage=st + 100, threshold_name='As per CA',
+                              breach_flag=int(lane == 'L1' and st == 500))
+                         for lane in ('L1', 'L2', 'L3', 'L4') for st in range(0, 1000, 100)])
 
 
 class TestParentBreachPatch(unittest.TestCase):
@@ -47,7 +46,7 @@ class TestParentBreachPatch(unittest.TestCase):
         self.folder = os.path.join(self.tmp, "Zone=B", "Phase=2", "Cycle=1", "UPC=U1", "dlm_kpi_new")
         os.makedirs(self.folder)
         _lane_table().to_parquet(os.path.join(self.folder, "master_cracking_1000m_lane.parquet"), index=False)
-        _children_10m().to_parquet(os.path.join(self.folder, "master_cracking_10m.parquet"), index=False)
+        _ca_children().to_parquet(os.path.join(self.folder, "master_cracking_as_per_ca.parquet"), index=False)
 
     def _lane_file(self):
         return os.path.join(self.folder, "master_cracking_1000m_lane.parquet")
@@ -65,7 +64,9 @@ class TestParentBreachPatch(unittest.TestCase):
         self.assertEqual(out.loc['L1', 'defect_id'], 'U1_L1_0_1000')
         self.assertEqual(out.loc['L1', 'road_condition'], 'Bad')
         self.assertEqual(out.loc['L1', 'affected_length_ca'], 1000.0)
-        self.assertEqual(out.loc['L1', 'affected_length_irc'], 0.0)         # the child breaches CA only
+        self.assertTrue(str(out.loc['L1', 'rating_ca']).startswith('Poor'))   # was Very Good by the average
+        self.assertEqual(out.loc['L1', 'affected_length_irc'], 0.0)         # IRC is not touched
+        self.assertTrue(str(out.loc['L2', 'rating_ca']).startswith('Very Good'))
         self.assertEqual(out.loc['L2', 'breach_flag'], 0)
         self.assertEqual(out.loc['L2', 'road_condition'], 'Good')
 
@@ -76,6 +77,7 @@ class TestParentBreachPatch(unittest.TestCase):
         self.assertTrue(pd.isna(out.loc['L2', 'display_defect_id']))                  # not a breach -> no ID
         m = json.loads(out.loc['L1', 'measures'])
         self.assertEqual((m['breach_from_child_ca'], m['breach_from_value_ca']), (1, 0))
+        self.assertNotIn('breach_from_child_irc', m)
         self.assertIn('patched_parent_breach', m)
 
         backups = [f for _, _, fs in os.walk(os.path.join(self.tmp, "_patch_backup")) for f in fs]

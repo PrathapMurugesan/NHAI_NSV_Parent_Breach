@@ -218,18 +218,7 @@ def build_all_silver_hierarchy(
     new_outputs = {}
 
     for d in DEFECTS_LIN:
-        # Build side parent if applicable
-        if has_parent(d):
-            p_table = t_parent(d)
-            p_src = SRC_1KM[d] if parent_len(d) == PARENT_LENGTH_M else SRC_100[d]
-            src_df = output_dfs.get(p_src)
-            new_outputs[p_table] = build_side_parent(
-                d, src_df, upc, ca_ths[d], PARENT_LENGTH_M,
-                src_10m=output_dfs.get(SRC_10M[d]),
-                irc_threshold=irc_ths.get(d),
-            )
-
-        # Build children
+        # Build children (the "as per CA" child is needed by the parent: a breaching child makes it a breach)
         for t, kind in TABLE_SPEC[d]['children']:
             if kind == 'ca':
                 # Prefer the table aggregated at the tracker's CA interval;
@@ -253,6 +242,19 @@ def build_all_silver_hierarchy(
                 new_outputs[t] = build_child_irc100(
                     d, t, src_100, src_name, upc, ca_ivs.get(d), irc_ths.get(d)
                 )
+
+        # Build side parent if applicable
+        if has_parent(d):
+            p_table = t_parent(d)
+            p_src = SRC_1KM[d] if parent_len(d) == PARENT_LENGTH_M else SRC_100[d]
+            src_df = output_dfs.get(p_src)
+            ca_table = next((t for t, k in TABLE_SPEC[d]['children'] if k == 'ca'), None)
+            new_outputs[p_table] = build_side_parent(
+                d, src_df, upc, ca_ths[d], PARENT_LENGTH_M,
+                src_10m=output_dfs.get(SRC_10M[d]),
+                irc_threshold=irc_ths.get(d),
+                ca_children=new_outputs.get(ca_table),
+            )
 
     # Build Potholes
     pothole_df = output_dfs.get('master_pothole')
@@ -290,8 +292,9 @@ def build_all_silver_hierarchy(
     # (a row that already has an ID keeps it).
     seq = max(starting_seq, max_display_seq(*new_outputs.values()))
     for d in DEFECTS_LIN:
+        ca_table = next((t for t, k in TABLE_SPEC[d]['children'] if k == 'ca'), None)
         lane_df = build_lane_1000m(d, output_dfs.get(SRC_1KM[d]), upc, irc_ths.get(d), PARENT_LENGTH_M,
-                                   src_10m=output_dfs.get(SRC_10M[d]))
+                                   ca_children=new_outputs.get(ca_table), ca_threshold=ca_ths.get(d))
         if not lane_df.empty:
             lane_df, n_new = assign_missing_display_ids(lane_df, date_str, seq + 1)
             seq += n_new

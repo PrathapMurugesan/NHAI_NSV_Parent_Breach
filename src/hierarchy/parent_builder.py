@@ -10,18 +10,19 @@ Roughness (one record per side per 1000m):
   - Side IRI = (mean LWP IRI + mean RWP IRI) / 2
   - Side BI  = 630 x (Side IRI)^1.12
   - breach_flag / affected_length_ca / rating_ca / road_condition: Side BI >= CA limit
-    OR any 10m 'As per CA' child of the side in that 1000m breaches (see below)
-  - affected_length_irc / rating_irc: Side BI >= IRC limit OR any 10m 'As per IRC' child breaches
-    (same record, no IRC row)
+    OR any "as per CA" child of the side in that 1000m breaches (see below)
+  - affected_length_irc / rating_irc: Side BI >= IRC limit (same record, no IRC row)
   - iri_value, roughness_bi and metric_value all carry the side values
 Rutting (one record per side per 1000m), same pattern:
   - Side rut = (mean Left + mean Right) / 2 over the side's pooled 10m rows
     (mean of the 10m average rut depth when Left/Right are missing)
   - CA breach / IRC columns on the same record, as for roughness
 
-Breach follows the children: a side parent (0-1000m) is a breach when its value is above the limit OR when
-any one 10m child of that side and 1000m is a breach - one breaching 10m child is enough, even when the
-average of the parent stays below the limit. CA and IRC are decided separately, each from its own 10m rows.
+Breach follows the "as per CA" children: a side parent (0-1000m) is a breach when its value is above the limit
+OR when any one "as per CA" child (master_<defect>_as_per_ca, the child at the CA reporting interval) of that
+side in those 1000m is a breach, even when the average of the parent stays below the limit. The 10m rows are
+not used for this. A parent that is a breach only through a child gets road_condition 'Bad' and the 'Poor'
+rating_ca (its average could still rate Good / Very Good). IRC stays on the parent's own value.
 """
 
 from typing import Dict, Any, List, Optional, Tuple
@@ -38,7 +39,7 @@ from src.common.constants import (
     lane_to_direction,
 )
 from src.common.logger import get_logger
-from src.processing.ratings import compute_ca_rating_label
+from src.processing.ratings import compute_ca_rating_label, poor_rating_label
 
 logger = get_logger(__name__)
 
@@ -48,14 +49,14 @@ def _side_of_lane(lane_series: pd.Series) -> np.ndarray:
     return np.where(norm.str.startswith('L'), 'LHS', np.where(norm.str.startswith('R'), 'RHS', None))
 
 
-def child_breach_bins(src_10m: Optional[pd.DataFrame], threshold_name: str, parent_len_m: int) -> set:
+def child_breach_bins(children: Optional[pd.DataFrame], threshold_name: str, parent_len_m: int) -> set:
     """
-    {(side, bin_start)} of the side parents that have at least one breaching 10m child
-    (breach_flag == 1 on a 10m row of that standard, in any lane of the side).
+    {(side, bin_start)} of the side parents that have at least one breaching "as per CA" child
+    (breach_flag == 1 on a row of master_<defect>_as_per_ca, in any lane of the side).
     """
-    if src_10m is None or src_10m.empty or 'breach_flag' not in src_10m.columns:
+    if children is None or children.empty or 'breach_flag' not in children.columns:
         return set()
-    df = src_10m
+    df = children
     if 'threshold_name' in df.columns:
         df = df[df['threshold_name'] == threshold_name]
     df = df[pd.to_numeric(df['breach_flag'], errors='coerce').fillna(0).astype(int) == 1]
@@ -174,10 +175,12 @@ def build_side_parent(
     parent_len_m: int = PARENT_LENGTH_M,
     src_10m: Optional[pd.DataFrame] = None,
     irc_threshold: Optional[float] = None,
+    ca_children: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Build LHS / RHS 1000m parent table for a given defect from its 1km CA rows.
     Roughness and rutting: side value pooled from the side's 10m rows (see module docstring).
+    ca_children: the defect's "as per CA" child table - a breaching child makes its parent a breach.
     """
     if not has_parent(defect) or src_df is None or src_df.empty:
         return pd.DataFrame()
@@ -218,8 +221,8 @@ def build_side_parent(
     else:
         pooled = {}
 
-    ca_child_hits = child_breach_bins(src_10m, 'As per CA', L)
-    irc_child_hits = child_breach_bins(src_10m, 'As per IRC', L)
+    ca_child_hits = child_breach_bins(ca_children, 'As per CA', L)
+    poor = poor_rating_label(defect, ca_threshold)
 
     rows = []
     grouped = df.groupby(['_side', '_b'])
@@ -234,7 +237,6 @@ def build_side_parent(
         mv = pd.to_numeric(g['metric_value'], errors='coerce')
         lane_bf = pd.to_numeric(g['breach_flag'], errors='coerce').fillna(0).astype(int)
         child_ca = (side, b) in ca_child_hits
-        child_irc = (side, b) in irc_child_hits
         bf = int(lane_bf.max() == 1 or child_ca)
 
         worst = g.loc[mv.idxmax()] if mv.notna().any() else first
@@ -308,7 +310,8 @@ def build_side_parent(
             metric_ca = side_bi is not None and side_bi >= float(ca_threshold)
             metric_irc = side_bi is not None and irc_threshold is not None and side_bi >= float(irc_threshold)
             bf_ca = int(metric_ca or child_ca)
-            bf_irc = int(metric_irc or child_irc)
+            bf_irc = int(metric_irc)
+            child_only = bool(child_ca and not metric_ca)          # a breach only through an "as per CA" child
             tot = _sum('length_m')
             rec.update({
                 'iri_value': pr['iri'],
@@ -316,8 +319,9 @@ def build_side_parent(
                 'metric_value': None if side_bi is None else round(side_bi, 6),
                 'breach_flag': bf_ca,
                 'defect_id': pid if bf_ca else None,
-                'rating_ca': compute_ca_rating_label('roughness', side_bi, side_bi, {'roughness': float(ca_threshold)}),
-                'rating_irc': None if (side_bi is None and not bf_irc) else ('Poor' if bf_irc else 'Good'),
+                'rating_ca': (poor if child_only and poor else
+                              compute_ca_rating_label('roughness', side_bi, side_bi, {'roughness': float(ca_threshold)})),
+                'rating_irc': None if side_bi is None else ('Poor' if bf_irc else 'Good'),
                 'road_condition': 'Bad' if bf_ca else 'Good',
                 'affected_length': tot if bf_ca else 0.0,
                 'affected_length_ca': tot if bf_ca else 0.0,
@@ -337,16 +341,14 @@ def build_side_parent(
                     'breach_irc': bf_irc,
                     'breach_from_value_ca': int(metric_ca),
                     'breach_from_child_ca': int(child_ca),
-                    'breach_from_value_irc': int(metric_irc),
-                    'breach_from_child_irc': int(child_irc),
                     'lane_bi_values': {
                         str(l): (None if pd.isna(v) else round(float(v), 6))
                         for l, v in zip(g['lane'], mv)
                     },
                     'calculation': (
                         f"{side} {b}-{b + L}: Side IRI = (mean LWP + mean RWP)/2 over {pr['rows']} pooled 10m rows; "
-                        f"Side BI = 630 x IRI^1.12; CA breach if BI >= {ca_threshold} or any 10m child breaches"
-                        + (f"; IRC breach if BI >= {irc_threshold} or any 10m child breaches" if irc_threshold is not None else "")
+                        f"Side BI = 630 x IRI^1.12; CA breach if BI >= {ca_threshold} or any as-per-CA child breaches"
+                        + (f"; IRC breach if BI >= {irc_threshold}" if irc_threshold is not None else "")
                     ),
                 }),
             })
@@ -357,15 +359,17 @@ def build_side_parent(
             metric_ca = val is not None and val >= float(ca_threshold)
             metric_irc = val is not None and irc_threshold is not None and val >= float(irc_threshold)
             bf_ca = int(metric_ca or child_ca)
-            bf_irc = int(metric_irc or child_irc)
+            bf_irc = int(metric_irc)
+            child_only = bool(child_ca and not metric_ca)          # a breach only through an "as per CA" child
             tot = _sum('length_m')
             rec.update({
                 'rutting_avg': val,
                 'metric_value': None if val is None else round(val, 6),
                 'breach_flag': bf_ca,
                 'defect_id': pid if bf_ca else None,
-                'rating_ca': compute_ca_rating_label('rutting', val, None, {'rutting': float(ca_threshold)}),
-                'rating_irc': None if (val is None and not bf_irc) else ('Poor' if bf_irc else 'Good'),
+                'rating_ca': (poor if child_only and poor else
+                              compute_ca_rating_label('rutting', val, None, {'rutting': float(ca_threshold)})),
+                'rating_irc': None if val is None else ('Poor' if bf_irc else 'Good'),
                 'road_condition': 'Bad' if bf_ca else 'Good',
                 'affected_length': tot if bf_ca else 0.0,
                 'affected_length_ca': tot if bf_ca else 0.0,
@@ -384,16 +388,14 @@ def build_side_parent(
                     'breach_irc': bf_irc,
                     'breach_from_value_ca': int(metric_ca),
                     'breach_from_child_ca': int(child_ca),
-                    'breach_from_value_irc': int(metric_irc),
-                    'breach_from_child_irc': int(child_irc),
                     'lane_values': {
                         str(l): (None if pd.isna(v) else round(float(v), 6))
                         for l, v in zip(g['lane'], mv)
                     },
                     'calculation': (
                         f"{side} {b}-{b + L}: Side rut = (mean Left + mean Right)/2 over {pr['rows']} pooled 10m rows; "
-                        f"CA breach if >= {ca_threshold} or any 10m child breaches"
-                        + (f"; IRC breach if >= {irc_threshold} or any 10m child breaches" if irc_threshold is not None else "")
+                        f"CA breach if >= {ca_threshold} or any as-per-CA child breaches"
+                        + (f"; IRC breach if >= {irc_threshold}" if irc_threshold is not None else "")
                     ),
                 }),
             })
