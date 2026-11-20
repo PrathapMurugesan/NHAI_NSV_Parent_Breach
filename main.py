@@ -75,6 +75,7 @@ from src.output.csv_exporter import export_to_csv
 # Validation
 from src.validation.validator import Validator
 from src.validation.validation_report import generate_validation_summary, save_validation_report
+from src.output.run_logs import RunLog, logs_root
 
 logger = get_logger("dlm_pipeline")
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -121,8 +122,16 @@ def write_batch_summary(summary_path: str, batch_file: str, results: List[Tuple[
 
 def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
     """
-    Execute the DLM extraction pipeline for a single UPC with given settings.
+    Execute the DLM extraction pipeline for a single UPC. The run log, the DQ report and a run summary are written to
+    <silver UPC root>/dlm_logs/ (also when the run fails).
     """
+    with RunLog(settings) as run:
+        run.result = _run_pipeline(settings)
+        return run.result
+
+
+def _run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
+    """The ten steps of one UPC."""
     logger.info("=" * 80)
     logger.info("STARTING DLM EXTRACTION PIPELINE")
     logger.info("UPC: %s | Zone: %s | Phase: %s | Cycle: %s", settings.upc, settings.zone, settings.phase, settings.cycle)
@@ -415,6 +424,11 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
         f"validation_{settings.upc}_P{settings.phase}_C{settings.cycle}.csv"
     )
     save_validation_report(val_results, val_out_path)
+    # DQ report next to the UPC's Silver tables (latest run), with the V1 - V12 checks
+    save_validation_report(val_results, f"{logs_root(settings.silver_output_dir)}/dq_report.csv")
+    n_fail = int((val_results['status'] == 'FAIL').sum()) if not val_results.empty else 0
+    if n_fail:
+        logger.warning("DQ: %d check(s) FAILED - see %s/dq_report.csv", n_fail, logs_root(settings.silver_output_dir))
 
     # Excel export
     excel_path = os.path.join(
@@ -441,6 +455,7 @@ def run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
         'excel_export': excel_path,
         'csv_export_dir': csv_dir,
         'validation_summary': val_results['status'].value_counts().to_dict() if not val_results.empty else {},
+        'rows': int(sum(len(v) for v in silver_outputs.values() if v is not None)),
     }
 
 

@@ -53,7 +53,7 @@ dlm-extraction-pipeline/
 │   │   └── csv_exporter.py     # CSV exporter with _index.csv integrity report
 │   │
 │   └── validation/
-│       ├── validator.py        # Comprehensive V1-V9 validation checks
+│       ├── validator.py        # DQ checks V1-V12 (V10 lane tables, V11 breach rule, V12 ID counter)
 │       ├── validation_report.py# Formatted console validation summary
 │       └── batch_report.py     # Multi-UPC validation pivot and detail sheets
 │
@@ -172,7 +172,7 @@ python3 -m unittest discover tests
 | 12 | `geometry_parent` | 22 | `parent` | UPC-level geometry summary & surveyed length |
 | 13 | `geometry_child` | 13 | `child` | Surveyed geometry segments per lane with GPS |
 | 14 | `master_chainage` | 54 | `master` | Continuous 10m chainage spine with lane & side GPS |
-| 15 | `dlm_validation_results` | 9 | `report` | Unified V1–V9 validation checks report |
+| 15 | `dlm_validation_results` | 9 | `report` | Unified V1–V12 validation checks report |
 | 16 | `master_roughness_1000m_lane` | 93 | `lane_1000m` | Lane-wise (L1, L2, ... R1, ...) 1000m roughness, not pooled into LHS / RHS |
 | 17 | `master_rutting_1000m_lane` | 92 | `lane_1000m` | Lane-wise 1000m rutting |
 | 18 | `master_cracking_1000m_lane` | 89 | `lane_1000m` | Lane-wise 1000m cracking |
@@ -188,3 +188,17 @@ up to date with `patch/patch_parent_breach.py` (see `patch/README.md`). Breach r
 `display_defect_id` continuing the UPC's counter (a row that already has one keeps it). The lane tables are numbered after the main
 tables, so the IDs of the other tables (the LHS / RHS parents and the children) do not change.
 
+## Run log and DQ report per UPC
+
+Every UPC run writes, next to its Silver tables (S3 or local), in `<silver UPC root>/dlm_logs/`:
+
+| File | Content |
+|---|---|
+| `run_<time>.log` | the full log of that run (also when the run fails, with the traceback) |
+| `dq_report.csv` | the DQ checks V1-V12 of the latest run (PASS / WARN / FAIL / SKIP) |
+| `run_summary.csv` | one row per run: status, seconds, tables, rows, DQ counts, last error line |
+
+V10 checks the lane-wise 1000m tables (one row per lane per 1000m, lane / side / parent_id, defect_id and length of every
+breach). V11 checks the breach rule: a parent or lane with a breaching "as per CA" child is a breach, and a child-only breach
+is Bad with the Poor rating. V12 checks that a top-level display_defect_id belongs to one table only. The image upload log
+(`image_upload_log.csv`) stays in the UPC root. The patch has its own log and DQ report (see `patch/README.md`).

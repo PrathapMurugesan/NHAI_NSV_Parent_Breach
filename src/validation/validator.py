@@ -16,6 +16,7 @@ Implements checks V1 through V9:
 
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime, timezone
+import json
 import pandas as pd
 import numpy as np
 
@@ -38,8 +39,12 @@ from src.common.constants import (
     SRC_1KM,
     IRC_TV,
     normalize_lane,
+    lane_1000m_table,
 )
 from src.common.logger import get_logger
+from src.hierarchy.lane_builder import child_breach_lane_bins
+from src.hierarchy.parent_builder import child_breach_bins
+from src.processing.ratings import poor_rating_label
 
 logger = get_logger(__name__)
 
@@ -105,6 +110,9 @@ class Validator:
         self._v3_ca_children()
         self._v4_v5_v6_v7_v8()
         self._v9_chainage()
+        self._v10_lane()
+        self._v11_breach_rule()
+        self._v12_ids()
 
         val_df = pd.DataFrame(self.val_rows)
         if not val_df.empty:
@@ -223,6 +231,116 @@ class Validator:
                             for c, p in zip(C.loc[has, 'display_defect_id'], pd_id[has])
                         )
                         self._rec('V8 IDs', 'child ID = breaching parent ID + /nnnn', t, int(has.sum()), int(has.sum() - ok))
+
+    # ------------------------------------------------------------------------------------------------------
+    # V10 - V12: the lane-wise 1000m tables, the "breach follows the as-per-CA children" rule, ID counter
+    # ------------------------------------------------------------------------------------------------------
+    def _breach_tables(self):
+        """[(defect, kind, table, child 'as per CA' table)] of the parents (roughness, rutting) and lane tables."""
+        out = []
+        for d in DEFECTS_LIN:
+            ca_t = next((t for t, k in TABLE_SPEC[d]['children'] if k == 'ca'), None)
+            if has_parent(d):
+                out.append((d, 'parent', t_parent(d), ca_t))
+            lt = lane_1000m_table(d)
+            if lt:
+                out.append((d, 'lane', lt, ca_t))
+        return out
+
+    def _v10_lane(self) -> None:
+        for d in DEFECTS_LIN:
+            t = lane_1000m_table(d)
+            if not t:
+                continue
+            C = self.new_outputs.get(t)
+            if C is None or C.empty:
+                self._rec('V10 Lane', 'lane table built', t, 1, int(C is None or C.empty),
+                          'no rows (no lane-wise 1000m aggregate for this defect)', level='WARN')
+                continue
+            lane = C['lane'].apply(normalize_lane)
+            lo = np.minimum(pd.to_numeric(C['start_chainage'], errors='coerce'),
+                            pd.to_numeric(C['end_chainage'], errors='coerce'))
+            b = (lo // PARENT_LENGTH_M * PARENT_LENGTH_M)
+            key = pd.DataFrame({'lane': lane, 'b': b})
+            self._rec('V10 Lane', f'one row per lane per {PARENT_LENGTH_M}m', t, len(C), int(key.duplicated().sum()))
+            self._rec('V10 Lane', 'lane is a real lane (L1.. / R1..)', t, len(C),
+                      int((~lane.fillna('').str.match(r'^[LR]\d+$')).sum()))
+            if 'side' in C.columns:
+                exp = np.where(lane.fillna('').str.startswith('L'), 'LHS', np.where(lane.fillna('').str.startswith('R'), 'RHS', None))
+                self._rec('V10 Lane', 'side follows the lane (L -> LHS, R -> RHS)', t, len(C), int((C['side'].to_numpy() != exp).sum()))
+            self._rec('V10 Lane', 'parent_id = <UPC>_<lane>_<start>_<end>', t, len(C),
+                      int((C['parent_id'].astype(str) != [f"{self.upc}_{ln}_{int(x)}_{int(x) + PARENT_LENGTH_M}"
+                                                          for ln, x in zip(lane, b.fillna(-1))]).sum()))
+            br = pd.to_numeric(C.get('breach_flag', 0), errors='coerce').fillna(0).astype(int) == 1
+            has_def = C['defect_id'].notna() & (C['defect_id'].astype(str) != '') if 'defect_id' in C.columns else pd.Series(False, index=C.index)
+            self._rec('V10 Lane', 'breach rows have a defect_id', t, int(br.sum()), int((br & ~has_def).sum()))
+            al = pd.to_numeric(C.get('affected_length_ca', 0), errors='coerce').fillna(0)
+            self._rec('V10 Lane', 'breach rows have affected_length_ca > 0', t, int(br.sum()), int((al[br] <= 0).sum()))
+            self._rec('V10 Lane', 'non-breach rows have affected_length_ca = 0', t, int((~br).sum()), int((al[~br] != 0).sum()))
+
+    def _child_only(self, df: pd.DataFrame) -> pd.Series:
+        """Rows whose measures JSON says the breach came only from an 'as per CA' child."""
+        res = pd.Series(False, index=df.index)
+        if 'measures' not in df.columns:
+            return res
+        br = pd.to_numeric(df.get('breach_flag', 0), errors='coerce').fillna(0).astype(int) == 1
+        for i in df.index[br]:
+            try:
+                m = json.loads(df.at[i, 'measures'])
+                res[i] = bool(m.get('breach_from_child_ca')) and not m.get('breach_from_value_ca')
+            except Exception:
+                pass
+        return res
+
+    def _v11_breach_rule(self) -> None:
+        """A parent / lane record is a breach when its own value is - or any one 'as per CA' child in it is."""
+        for d, kind, t, ca_t in self._breach_tables():
+            C, K = self.new_outputs.get(t), self.new_outputs.get(ca_t) if ca_t else None
+            if C is None or C.empty or K is None or K.empty:
+                continue
+            lo = np.minimum(pd.to_numeric(C['start_chainage'], errors='coerce'),
+                            pd.to_numeric(C['end_chainage'], errors='coerce'))
+            b = (pd.to_numeric(C['parent_start_chainage'], errors='coerce') if 'parent_start_chainage' in C.columns
+                 else lo // PARENT_LENGTH_M * PARENT_LENGTH_M).fillna(lo // PARENT_LENGTH_M * PARENT_LENGTH_M)
+            if kind == 'parent':
+                hits = child_breach_bins(K, 'As per CA', PARENT_LENGTH_M)
+                keys = list(zip(C['side'].astype(str), b))
+            else:
+                hits = child_breach_lane_bins(K, 'As per CA', PARENT_LENGTH_M)
+                keys = list(zip(C['lane'].apply(normalize_lane), b))
+            ch = pd.Series([(k, int(x)) in hits for k, x in keys if pd.notna(x)] if b.notna().all()
+                           else [False] * len(C), index=C.index)
+            br = pd.to_numeric(C.get('breach_flag', 0), errors='coerce').fillna(0).astype(int) == 1
+            self._rec('V11 Breach rule', 'a breaching as-per-CA child makes its parent / lane a breach', t,
+                      int(ch.sum()), int((ch & ~br).sum()), bad=C[ch & ~br])
+            only = self._child_only(C)
+            self._rec('V11 Breach rule', 'child-only breach has road_condition Bad', t, int(only.sum()),
+                      int((C.loc[only, 'road_condition'].astype(str) != 'Bad').sum()) if only.any() else 0)
+            if only.any():
+                thr = pd.to_numeric(C.get('threshold_value'), errors='coerce')
+                poor = pd.Series([poor_rating_label(d, thr[i]) for i in C.index[only]], index=C.index[only])
+                ok = poor.notna()
+                self._rec('V11 Breach rule', 'child-only breach has the Poor rating_ca', t, int(ok.sum()),
+                          int((C.loc[poor.index[ok], 'rating_ca'].astype(str) != poor[ok].astype(str)).sum()))
+                self._rec('V11 Breach rule', 'Poor rating could be named (threshold_value present)', t, int(only.sum()),
+                          int((~ok).sum()), 'threshold_value empty - rating_ca left as it was', level='WARN')
+
+    def _v12_ids(self) -> None:
+        """The display_defect_id counter of the UPC is not reused: a top-level ID belongs to one record only."""
+        import re
+        top_re = re.compile(r'^D/\d{6}/N/\d{5}$')
+        seen, where = {}, {}
+        for t, df in self.new_outputs.items():
+            if df is None or df.empty or 'display_defect_id' not in df.columns:
+                continue
+            for v in df['display_defect_id'].dropna().astype(str):
+                if top_re.match(v):
+                    seen[v] = seen.get(v, 0) + 1
+                    where.setdefault(v, set()).add(t)
+        multi = {v: w for v, w in where.items() if len(w) > 1}
+        ex = '; '.join(f"{v} in {sorted(w)}" for v, w in list(multi.items())[:3])
+        self._rec('V12 ID counter', 'a top-level display_defect_id is used in one table only', 'all tables',
+                  len(seen), len(multi), ex, level='WARN')
 
     def _v9_chainage(self) -> None:
         if 'master_chainage' not in self.new_outputs or self.new_outputs['master_chainage'] is None:
