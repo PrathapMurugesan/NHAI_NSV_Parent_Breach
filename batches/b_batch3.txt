@@ -1,0 +1,4 @@
+# zone B batch 3 of 4 (3 surveys). columns: UPC ZONE PHASE CYCLE
+N_08009_04002_GJ B 2 1
+N_08009_05001_GJ B 2 1
+N_08009_07002_GJ B 2 1
