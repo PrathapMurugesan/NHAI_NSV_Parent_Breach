@@ -1,32 +1,75 @@
 """
 Postgres (dhms_uat) connection settings for the Silver -> DB push (push/).
 
-Same database, user and schema as silver_to_uat_push_1.py. The password is NOT stored in this repo: it comes from the
-DB_PASSWORD environment variable or from the git-ignored file config/db.local.env (one line: DB_PASSWORD=...).
-Create that file from the push script with:   python3 push/make_db_local_env.py <path of silver_to_uat_push_1.py>
-Every value can be overridden by an environment variable of the same name.
+Nothing secret is stored in the repo. The settings are the ones already on the machine, looked up in this order:
+  1. environment variables
+  2. the pipeline's .env (repo root) and config/db.local.env (git-ignored)
+under any of the usual names:
+  host      DB_HOST      PGHOST          POSTGRES_HOST      DATABASE_HOST
+  port      DB_PORT      PGPORT          POSTGRES_PORT
+  database  DB_NAME      PGDATABASE      POSTGRES_DB        DB_DATABASE
+  user      DB_USER      PGUSER          POSTGRES_USER
+  password  DB_PASSWORD  PGPASSWORD      POSTGRES_PASSWORD  DB_PASS
+  schema    DB_SCHEMA    (default public)
+Values in .env that are shell expressions (${VAR:-x}) are skipped - export those as environment variables.
+describe() lists which names were found (never the values).
 """
 import os
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-_LOCAL = Path(__file__).resolve().parent / "db.local.env"
+_ROOT = Path(__file__).resolve().parent.parent
+_FILES = [_ROOT / ".env", Path(__file__).resolve().parent / "db.local.env"]
+
+_NAMES: Dict[str, List[str]] = {
+    "host": ["DB_HOST", "PGHOST", "POSTGRES_HOST", "DATABASE_HOST"],
+    "port": ["DB_PORT", "PGPORT", "POSTGRES_PORT"],
+    "database": ["DB_NAME", "PGDATABASE", "POSTGRES_DB", "DB_DATABASE"],
+    "user": ["DB_USER", "PGUSER", "POSTGRES_USER"],
+    "password": ["DB_PASSWORD", "PGPASSWORD", "POSTGRES_PASSWORD", "DB_PASS"],
+    "schema": ["DB_SCHEMA"],
+}
 
 
-def _local_env() -> dict:
-    out = {}
-    if _LOCAL.exists():
-        for line in _LOCAL.read_text(encoding="utf-8").splitlines():
+def _file_values() -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for f in _FILES:
+        if not f.exists():
+            continue
+        for line in f.read_text(encoding="utf-8", errors="ignore").splitlines():
             line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip().strip('"').strip("'")
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            v = v.strip().strip('"').strip("'")
+            if v and "${" not in v and "$(" not in v:
+                out[k.strip()] = v
     return out
 
 
-_L = _local_env()
-DB_HOST = os.environ.get("DB_HOST", _L.get("DB_HOST", "dhms-development-dhms-development-postgresql.cdk480kqufch.ap-south-1.rds.amazonaws.com"))
-DB_PORT = int(os.environ.get("DB_PORT", _L.get("DB_PORT", "5432")))
-DB_NAME = os.environ.get("DB_NAME", _L.get("DB_NAME", "dhms_uat"))
-DB_USER = os.environ.get("DB_USER", _L.get("DB_USER", "dhms_admin"))
-DB_PASSWORD = os.environ.get("DB_PASSWORD", _L.get("DB_PASSWORD", ""))
-DB_SCHEMA = os.environ.get("DB_SCHEMA", _L.get("DB_SCHEMA", "public"))
+_FILE = _file_values()
+
+
+def _find(key: str) -> Tuple[Optional[str], str]:
+    """(value, name it was found under / '')"""
+    for name in _NAMES[key]:
+        if os.environ.get(name):
+            return os.environ[name], f"{name} (environment)"
+    for name in _NAMES[key]:
+        if _FILE.get(name):
+            return _FILE[name], f"{name} (.env / db.local.env)"
+    return None, ""
+
+
+def describe() -> str:
+    return "; ".join(f"{k}: {_find(k)[1] or 'NOT FOUND'}" for k in _NAMES)
+
+
+DB_HOST = _find("host")[0] or ""
+DB_PORT = int(_find("port")[0] or 5432)
+DB_NAME = _find("database")[0] or ""
+DB_USER = _find("user")[0] or ""
+DB_PASSWORD = _find("password")[0] or ""
+DB_SCHEMA = _find("schema")[0] or "public"

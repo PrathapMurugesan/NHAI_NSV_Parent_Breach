@@ -1,8 +1,8 @@
 # push/ - Silver -> Postgres (dhms_uat), with the IDs populated from Postgres
 
 * `silver_to_uat_push.py` - the push of `silver_to_uat_push_1.py` (github.com/shivamrajssai/silver_push_to_uat), same database,
-  user and schema. Credentials moved to `config/db_config.py`; the password comes from `DB_PASSWORD` or the git-ignored
-  `config/db.local.env` (create it with `python3 push/make_db_local_env.py <path of silver_to_uat_push_1.py>`).
+  user, password and schema - taken from the machine (`config/db_config.py`: environment variables or the pipeline `.env`,
+  names `DB_*` / `PG*` / `POSTGRES_*`). Nothing is stored in the repo and nothing has to be cloned.
   New flag `--populate-ids`: fills the project-level IDs from Postgres before the push and stops if one cannot be populated.
 * `populate_ids_from_db.py` - the check / populate tool for a list of surveys (read-only DB session).
 * The IDs: `project_id, piu_id, zone_id, state_id, region_id, contractor_id, ae_ie_id`. Value source: the UPC's row in

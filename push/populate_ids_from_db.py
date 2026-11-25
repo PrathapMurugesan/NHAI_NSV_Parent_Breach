@@ -160,9 +160,12 @@ def main():
     s = push.db_settings()
     mode = "APPLY" if a.apply else ("CHECK DB" if a.check_db else "CHECK")
     print(f"{mode}  {s['user']}@{s['host']}/{s['dbname']}  {len(surveys)} survey(s)  silver {s3_root}")
-    if not s["password"]:
-        sys.exit("DB password not set: export DB_PASSWORD or create config/db.local.env "
-                 "(python3 push/make_db_local_env.py <silver_to_uat_push_1.py>)")
+    from config import db_config
+    missing = [k for k in ("host", "dbname", "user", "password") if not s.get(k)]
+    if missing:
+        sys.exit(f"DB settings not found on this machine for: {missing}. Looked for - {db_config.describe()}. "
+                 "Export them (DB_HOST, DB_NAME, DB_USER, DB_PASSWORD or the PG* names) or put them in the pipeline .env.")
+    print("DB settings: " + db_config.describe())
     conn = psycopg2.connect(connect_timeout=15, application_name="silver_id_populate", **s)
     conn.set_session(readonly=True, autocommit=True)         # the DB is only read
     s3 = push.get_s3_client()
