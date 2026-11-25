@@ -50,3 +50,7 @@ env/
 
 # Patch reports
 /patch/logs/
+
+config/db.local.env
+push/logs/
+push/dry_run_output/
