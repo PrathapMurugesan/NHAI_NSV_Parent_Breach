@@ -12,3 +12,6 @@
   Nothing is guessed: no source -> `UNMAPPED`. Why: the push sets a foreign-key value it cannot find in the DB to NULL.
 * Order: 1) check  2) fix UNMAPPED / NO PROJECT  3) `--apply` (Silver rewritten, originals in `<silver>/_idpop_backup/<time>/`)
   4) push  5) `--check-db`.
+* `push_surveys.py` - pushes a list of surveys one after the other (own transaction each, a failed survey does not stop the
+  rest) with `--populate-ids`, and saves the log of every push plus `push_summary.csv` and `push_tables.csv` to
+  `<silver root>/_push_logs/<time>/` in S3 (and `push/logs/push_<time>/`). Dry run unless `--dry-run false`.
