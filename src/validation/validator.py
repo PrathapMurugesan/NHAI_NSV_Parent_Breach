@@ -268,8 +268,8 @@ class Validator:
             if 'side' in C.columns:
                 exp = np.where(lane.fillna('').str.startswith('L'), 'LHS', np.where(lane.fillna('').str.startswith('R'), 'RHS', None))
                 self._rec('V10 Lane', 'side follows the lane (L -> LHS, R -> RHS)', t, len(C), int((C['side'].to_numpy() != exp).sum()))
-            self._rec('V10 Lane', 'parent_id = <UPC>_<lane>_<start>_<end>', t, len(C),
-                      int((C['parent_id'].astype(str) != [f"{self.upc}_{ln}_{int(x)}_{int(x) + PARENT_LENGTH_M}"
+            self._rec('V10 Lane', 'parent_id = <UPC>_P<phase>_C<cycle>_<lane>_<start>_<end>', t, len(C),
+                      int((C['parent_id'].astype(str) != [f"{self.upc}_P{self.phase}_C{self.cycle}_{ln}_{int(x)}_{int(x) + PARENT_LENGTH_M}"
                                                           for ln, x in zip(lane, b.fillna(-1))]).sum()))
             br = pd.to_numeric(C.get('breach_flag', 0), errors='coerce').fillna(0).astype(int) == 1
             has_def = C['defect_id'].notna() & (C['defect_id'].astype(str) != '') if 'defect_id' in C.columns else pd.Series(False, index=C.index)

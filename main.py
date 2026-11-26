@@ -76,6 +76,7 @@ from src.output.csv_exporter import export_to_csv
 from src.validation.validator import Validator
 from src.validation.validation_report import generate_validation_summary, save_validation_report
 from src.output.run_logs import RunLog, logs_root
+from src.output.id_keys import apply_run_key, run_key
 
 logger = get_logger("dlm_pipeline")
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -396,6 +397,12 @@ def _run_pipeline(settings: PipelineSettings) -> Dict[str, Any]:
                 defect_type=kind,
             )
             logger.info("Image upload summary for %s: %s", t_img, img_summary)
+
+    # Phase / cycle in every record ID (<UPC>_P<phase>_C<cycle>_...), so the IDs are unique across phases and cycles.
+    # After the image upload: the upload log and the CDN image names keep the IDs they were uploaded with.
+    silver_outputs, id_changed = apply_run_key(silver_outputs, settings.upc, settings.phase, settings.cycle)
+    logger.info("Record IDs now start with %s_: %d ID values updated in %d tables",
+                run_key(settings.upc, settings.phase, settings.cycle), sum(id_changed.values()), len(id_changed))
 
     # Write tables to Parquet
     writer = TableWriter(output_dir=settings.silver_output_dir)

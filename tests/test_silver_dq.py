@@ -18,8 +18,8 @@ def _lane(flag_l1=1, cond_l1='Bad'):
     return pd.DataFrame({
         'id': ['t_L1_0', 't_L2_0'], 'lane': ['L1', 'L2'], 'side': ['LHS', 'LHS'],
         'start_chainage': [0, 0], 'end_chainage': [1000, 1000], 'parent_start_chainage': [0, 0],
-        'parent_id': ['U1_L1_0_1000', 'U1_L2_0_1000'], 'length_m': [1000.0, 1000.0],
-        'breach_flag': [flag_l1, 0], 'defect_id': ['U1_L1_0_1000' if flag_l1 else None, None],
+        'parent_id': ['U1_P2_C1_L1_0_1000', 'U1_P2_C1_L2_0_1000'], 'length_m': [1000.0, 1000.0],
+        'breach_flag': [flag_l1, 0], 'defect_id': ['U1_P2_C1_L1_0_1000' if flag_l1 else None, None],
         'display_defect_id': ['D/201126/N/00001' if flag_l1 else None, None],
         'road_condition': [cond_l1, 'Good'], 'rating_ca': ['Poor (20-30%)', 'Very Good (<5%)'], 'threshold_value': [5.0, 5.0],
         'affected_length_ca': [1000.0 if flag_l1 else 0.0, 0.0],

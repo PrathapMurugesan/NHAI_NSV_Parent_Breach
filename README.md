@@ -202,3 +202,11 @@ V10 checks the lane-wise 1000m tables (one row per lane per 1000m, lane / side /
 breach). V11 checks the breach rule: a parent or lane with a breaching "as per CA" child is a breach, and a child-only breach
 is Bad with the Poor rating. V12 checks that a top-level display_defect_id belongs to one table only. The image upload log
 (`image_upload_log.csv`) stays in the UPC root. The patch has its own log and DQ report (see `patch/README.md`).
+
+## Record IDs carry phase and cycle
+
+`id`, `parent_id`, `defect_id`, `record_id`, `source_defect_id` (and the geometry / child ids) start with
+`<UPC>_P<phase>_C<cycle>_`, e.g. `N_07024_01001_GJ_P1_C1_master_roughness_as_per_ca_000001`, so the same UPC in another phase
+or cycle gets different IDs (the DB primary key is `id`). The rule (`src/output/id_keys.py`) runs once on every table after the
+image upload and before the tables are written and validated; links stay intact, `display_defect_id` and the `upc` / `upc_code`
+columns are unchanged. Silver already in S3 keeps its old IDs until the UPC is extracted again.
